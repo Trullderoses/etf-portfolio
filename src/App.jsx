@@ -63,16 +63,20 @@ function LoginScreen({ onLogin }) {
   );
 }
 
+const COLORS = ["#4f7fff","#34d399","#f5d300","#ff9500","#a78bfa","#ff3b5c","#06b6d4","#f97316","#84cc16","#ec4899"];
+
 // ── Main App ─────────────────────────────────────────────────────────────────
 export default function ETFPortfolio() {
   const [authed, setAuthed] = useState(() => { try { return !!localStorage.getItem("etf_auth"); } catch(e) { return false; } });
-  const [config] = useState(DEFAULT_CONFIG);
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [precios, setPrecios] = useState(DEFAULT_PRECIOS);
   const [transacciones, setTransacciones] = useState([]);
   const [tab, setTab] = useState("dashboard");
   const [modal, setModal] = useState(null);
   const [formTx, setFormTx] = useState({ fecha: todayStr(), ticker:"VWCE", tipo:"Compra", participaciones:"", precio:"", comision:"" });
   const [formPrecio, setFormPrecio] = useState({ ...DEFAULT_PRECIOS });
+  const [formETF, setFormETF] = useState({ ticker:"", nombre:"", pesoObj:"" });
+  const [editingETF, setEditingETF] = useState(null);
   const [cargando, setCargando] = useState(true);
   const [tipoIS, setTipoIS] = useState(IS_TIPO_GENERAL);
   const [ejercicioFiscal, setEjercicioFiscal] = useState(new Date().getFullYear().toString());
@@ -91,16 +95,24 @@ export default function ETFPortfolio() {
     if (!authed) return;
     const unsubTx = onSnapshot(
       query(collection(db, "transacciones"), orderBy("fecha", "desc")),
-      (snap) => {
-        setTransacciones(snap.docs.map(d => ({ ...d.data(), id: d.id })));
-        setCargando(false);
-      },
+      (snap) => { setTransacciones(snap.docs.map(d => ({ ...d.data(), id: d.id }))); setCargando(false); },
       () => setCargando(false)
     );
     const unsubPrecios = onSnapshot(doc(db, "config", "precios"), (snap) => {
       if (snap.exists()) setPrecios(snap.data());
     });
-    return () => { unsubTx(); unsubPrecios(); };
+    const unsubConfig = onSnapshot(collection(db, "etfs"), async (snap) => {
+      if (snap.empty) {
+        // Primera vez: cargar los ETFs por defecto
+        for (const etf of DEFAULT_CONFIG) {
+          await setDoc(doc(db, "etfs", etf.ticker), etf);
+        }
+      } else {
+        const etfs = snap.docs.map(d => d.data()).sort((a,b) => b.pesoObj - a.pesoObj);
+        setConfig(etfs);
+      }
+    });
+    return () => { unsubTx(); unsubPrecios(); unsubConfig(); };
   }, [authed]);
 
   // ── Cartera calculada ─────────────────────────────────────────────────────
@@ -194,6 +206,35 @@ export default function ETFPortfolio() {
     setModal(null);
   };
 
+  const guardarETF = async () => {
+    const ticker = formETF.ticker.trim().toUpperCase();
+    const nombre = formETF.nombre.trim();
+    const pesoObj = parseFloat(formETF.pesoObj) / 100;
+    if (!ticker || !nombre || isNaN(pesoObj) || pesoObj <= 0) return;
+    const colorIdx = editingETF ? config.findIndex(c => c.ticker === editingETF) : config.length;
+    const color = COLORS[colorIdx % COLORS.length];
+    await setDoc(doc(db, "etfs", ticker), { ticker, nombre, pesoObj, color: editingETF ? (config.find(c=>c.ticker===editingETF)?.color || color) : color });
+    setModal(null); setEditingETF(null); setFormETF({ ticker:"", nombre:"", pesoObj:"" });
+  };
+
+  const eliminarETF = async (ticker) => {
+    await deleteDoc(doc(db, "etfs", ticker));
+  };
+
+  const abrirNuevoETF = () => {
+    setEditingETF(null);
+    setFormETF({ ticker:"", nombre:"", pesoObj:"" });
+    setModal("etf");
+  };
+
+  const abrirEditarETF = (etf) => {
+    setEditingETF(etf.ticker);
+    setFormETF({ ticker: etf.ticker, nombre: etf.nombre, pesoObj: (etf.pesoObj * 100).toFixed(1) });
+    setModal("etf");
+  };
+
+  const totalPesosObj = config.reduce((s, c) => s + c.pesoObj, 0);
+
   if (!authed) return <LoginScreen onLogin={handleLogin} />;
 
   if (cargando) return (
@@ -211,6 +252,7 @@ export default function ETFPortfolio() {
     { id:"cartera", label:"Cartera", icon:"◈" },
     { id:"rebalanceo", label:"Rebalanceo", icon:"⟳" },
     { id:"transacciones", label:"Transacciones", icon:"↕" },
+    { id:"etfs", label:"Mis ETFs", icon:"◇" },
     { id:"fiscalidad", label:"Fiscalidad IS", icon:"⊕" },
   ];
 
@@ -489,6 +531,69 @@ export default function ETFPortfolio() {
           </div>
         )}
 
+        {/* ── MIS ETFs ── */}
+        {tab === "etfs" && (
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10 }}>
+              <div>
+                <h2 style={{ fontSize:18, fontWeight:800, letterSpacing:"-0.02em" }}>Mis ETFs</h2>
+                <p style={{ fontSize:12, color:"#4a5a7a", marginTop:3 }}>
+                  Pesos objetivo total: <span style={{ color: Math.abs(totalPesosObj - 1) < 0.01 ? "#34d399" : "#ff9500", fontFamily:"'JetBrains Mono', monospace", fontWeight:700 }}>{fmtPct(totalPesosObj)}</span>
+                  {Math.abs(totalPesosObj - 1) > 0.01 && <span style={{ color:"#ff9500", marginLeft:8 }}>⚠ Deben sumar 100%</span>}
+                </p>
+              </div>
+              <button className="btn" onClick={abrirNuevoETF} style={{ background:"#4f7fff", color:"white", padding:"9px 18px", fontSize:13 }}>
+                + Añadir ETF
+              </button>
+            </div>
+
+            <div style={{ display:"grid", gridTemplateColumns:"80px 1fr 110px 110px 90px 100px", gap:10, padding:"5px 18px" }} className="hm">
+              {["Ticker","Nombre","Peso Obj.","Valor Act.","P&L","Acciones"].map(h=><span key={h} className="lbl">{h}</span>)}
+            </div>
+
+            {config.length === 0 ? (
+              <div className="card" style={{ textAlign:"center", padding:"48px", color:"#2a3a5a" }}>
+                <p style={{ fontSize:36, marginBottom:10 }}>◇</p>
+                <p>No hay ETFs configurados</p>
+                <p style={{ fontSize:12, marginTop:6 }}>Añade tu primer ETF para empezar</p>
+              </div>
+            ) : (
+              config.map(etf => {
+                const c = cartera.find(x => x.ticker === etf.ticker);
+                return (
+                  <div key={etf.ticker} className="row" style={{ gridTemplateColumns:"80px 1fr 110px 110px 90px 100px" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                      <div style={{ width:5, height:28, borderRadius:3, background:etf.color }} />
+                      <span style={{ fontWeight:800, fontSize:13, fontFamily:"'JetBrains Mono', monospace" }}>{etf.ticker}</span>
+                    </div>
+                    <span style={{ fontSize:13, color:"#8090b0" }}>{etf.nombre}</span>
+                    <div>
+                      <span style={{ fontFamily:"'JetBrains Mono', monospace", fontSize:14, fontWeight:700, color:etf.color }}>{fmtPct(etf.pesoObj)}</span>
+                      <div style={{ background:"#111e35", borderRadius:3, height:4, marginTop:4 }}>
+                        <div style={{ width:`${Math.min(etf.pesoObj*100,100)}%`, height:"100%", background:etf.color, borderRadius:3 }} />
+                      </div>
+                    </div>
+                    <span style={{ fontFamily:"'JetBrains Mono', monospace", fontSize:13, fontWeight:600 }}>{c ? fmtEur(c.valorMercado) : "—"}</span>
+                    <span style={{ fontFamily:"'JetBrains Mono', monospace", fontSize:13, color:c?.pnl>=0?"#34d399":"#ff3b5c", fontWeight:600 }}>
+                      {c?.pnl ? (c.pnl>=0?"+":"")+fmtEur(c.pnl) : "—"}
+                    </span>
+                    <div style={{ display:"flex", gap:6 }}>
+                      <button onClick={() => abrirEditarETF(etf)} style={{ background:"rgba(79,127,255,0.1)", color:"#4f7fff", border:"none", borderRadius:7, width:32, height:32, cursor:"pointer", fontSize:13 }}>✏️</button>
+                      <button onClick={() => eliminarETF(etf.ticker)} style={{ background:"rgba(255,59,92,0.1)", color:"#ff3b5c", border:"none", borderRadius:7, width:32, height:32, cursor:"pointer", fontSize:13 }}>🗑</button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+
+            <div style={{ background:"#0a1220", borderRadius:12, padding:"14px 18px", border:"1px solid #162035" }}>
+              <p style={{ fontSize:11, color:"#2a3a5a", lineHeight:1.6 }}>
+                💡 Los pesos objetivo deben sumar exactamente 100% para que el rebalanceo funcione correctamente. Al añadir un nuevo ETF, ajusta los pesos del resto.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* ── FISCALIDAD IS ── */}
         {tab === "fiscalidad" && (
           <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
@@ -667,6 +772,56 @@ export default function ETFPortfolio() {
             <div style={{ display:"flex", gap:10, marginTop:22, justifyContent:"flex-end" }}>
               <button className="btn" onClick={() => setModal(null)} style={{ background:"#111e35", color:"#8090b0", padding:"10px 18px", fontSize:13, border:"1px solid #1e2d4a" }}>Cancelar</button>
               <button className="btn" onClick={guardarPrecios} style={{ background:"#4f7fff", color:"white", padding:"10px 20px", fontSize:13, fontWeight:700 }}>Guardar precios</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Modal Añadir / Editar ETF ── */}
+      {modal === "etf" && (
+        <div className="modal-bg" onClick={() => setModal(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h2 style={{ fontSize:20, fontWeight:800, marginBottom:6 }}>{editingETF ? "Editar ETF" : "Añadir ETF"}</h2>
+            <p style={{ fontSize:13, color:"#4a5a7a", marginBottom:20 }}>
+              {editingETF ? "Modifica los datos del ETF" : "Añade un nuevo ETF a tu cartera"}
+            </p>
+            <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+              <div>
+                <label className="lbl" style={{ display:"block", marginBottom:6 }}>Ticker <span style={{ color:"#2a3a5a", textTransform:"none", fontSize:10 }}>(ej: VWCE, SPY, QQQ...)</span></label>
+                <input className="input" placeholder="TICKER" value={formETF.ticker}
+                  onChange={e => setFormETF({...formETF, ticker:e.target.value.toUpperCase()})}
+                  disabled={!!editingETF}
+                  style={{ opacity: editingETF ? 0.5 : 1, fontFamily:"'JetBrains Mono', monospace", fontWeight:700, fontSize:16, letterSpacing:"0.05em" }} />
+              </div>
+              <div>
+                <label className="lbl" style={{ display:"block", marginBottom:6 }}>Nombre descriptivo</label>
+                <input className="input" placeholder="Ej: RV Global, Bonos Euro..." value={formETF.nombre}
+                  onChange={e => setFormETF({...formETF, nombre:e.target.value})} />
+              </div>
+              <div>
+                <label className="lbl" style={{ display:"block", marginBottom:6 }}>
+                  Peso objetivo (%) <span style={{ color:"#2a3a5a", textTransform:"none", fontSize:10 }}>— total actual: {fmtPct(totalPesosObj)}</span>
+                </label>
+                <div style={{ position:"relative" }}>
+                  <input className="input" type="number" min="0" max="100" step="0.1" placeholder="0.0"
+                    value={formETF.pesoObj} onChange={e => setFormETF({...formETF, pesoObj:e.target.value})}
+                    style={{ paddingRight:36 }} />
+                  <span style={{ position:"absolute", right:14, top:"50%", transform:"translateY(-50%)", color:"#4a5a7a", fontSize:14, fontWeight:700 }}>%</span>
+                </div>
+                {formETF.pesoObj && (
+                  <p style={{ fontSize:11, color:"#4a5a7a", marginTop:5, fontFamily:"'JetBrains Mono', monospace" }}>
+                    Total resultante: <span style={{ color: Math.abs(totalPesosObj - (editingETF ? config.find(c=>c.ticker===editingETF)?.pesoObj||0 : 0) + parseFloat(formETF.pesoObj)/100 - 1) < 0.01 ? "#34d399" : "#ff9500" }}>
+                      {fmtPct(totalPesosObj - (editingETF ? config.find(c=>c.ticker===editingETF)?.pesoObj||0 : 0) + (parseFloat(formETF.pesoObj)||0)/100)}
+                    </span>
+                  </p>
+                )}
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:10, marginTop:22, justifyContent:"flex-end" }}>
+              <button className="btn" onClick={() => { setModal(null); setEditingETF(null); }} style={{ background:"#111e35", color:"#8090b0", padding:"10px 18px", fontSize:13, border:"1px solid #1e2d4a" }}>Cancelar</button>
+              <button className="btn" onClick={guardarETF} style={{ background:"#4f7fff", color:"white", padding:"10px 20px", fontSize:13, fontWeight:700 }}>
+                {editingETF ? "Guardar cambios" : "Añadir ETF"}
+              </button>
             </div>
           </div>
         </div>
